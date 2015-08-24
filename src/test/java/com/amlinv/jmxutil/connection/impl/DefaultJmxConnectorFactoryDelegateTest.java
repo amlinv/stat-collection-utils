@@ -14,21 +14,24 @@
  *   limitations under the License.
  */
 
-package com.amlinv.jmxutil.annotation;
+package com.amlinv.jmxutil.connection.impl;
 
-import java.lang.annotation.ElementType;
-import java.lang.annotation.Retention;
-import java.lang.annotation.RetentionPolicy;
-import java.lang.annotation.Target;
+import org.junit.Test;
+
+import static org.junit.Assert.*;
 
 /**
- * Indicates an mbean attribute with the given name; <b>must</b> be the setter.
- * Created by art on 3/31/15.
+ * Test the DefaultJmxConnectorFactoryDelegate: this test is intended to show line coverage and is not intended as
+ * a true functional test since the implementation is a simple pass-through to a static method call.
+ *
+ * Created by art on 8/18/15.
  */
-@Retention(RetentionPolicy.RUNTIME)
-@Target(ElementType.METHOD)
-public @interface MBeanAttribute {
-    String name();
+public class DefaultJmxConnectorFactoryDelegateTest {
 
-    Class<?> type();
+    @Test(expected = NullPointerException.class)
+    public void testConnect() throws Exception {
+        DefaultJmxConnectorFactoryDelegate delegate = new DefaultJmxConnectorFactoryDelegate();
+
+        delegate.connect(null);
+    }
 }

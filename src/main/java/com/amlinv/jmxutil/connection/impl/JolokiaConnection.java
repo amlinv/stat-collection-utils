@@ -57,6 +57,14 @@ public class JolokiaConnection implements MBeanBatchCapableAccessConnection {
         this.jolokiaClient = initJolokiaClient;
     }
 
+    public Logger getLog() {
+        return log;
+    }
+
+    public void setLog(Logger log) {
+        this.log = log;
+    }
+
     @Override
     public List<Attribute> getAttributes(ObjectName objectName, String... attributeNames)
             throws InstanceNotFoundException, IOException, ReflectionException {
@@ -101,7 +109,10 @@ public class JolokiaConnection implements MBeanBatchCapableAccessConnection {
             //
             // May have a partial result; copy out what we can.
             //
-            result = this.copyOutBatchAttributes(j4pBulkRemoteExc.getResponses(), objectAttNames);
+            List responses = new LinkedList(j4pBulkRemoteExc.getResponses());
+            responses.addAll(j4pBulkRemoteExc.getRemoteExceptions());
+
+            result = this.copyOutBatchAttributes(responses, objectAttNames);
         } catch (J4pException jolokiaExc) {
             // TODO: consider finer analysis of the exception
             throw new IOException("jolokia request failure", jolokiaExc);

@@ -14,21 +14,16 @@
  *   limitations under the License.
  */
 
-package com.amlinv.jmxutil.annotation;
+package com.amlinv.jmxutil.connection;
 
-import java.lang.annotation.ElementType;
-import java.lang.annotation.Retention;
-import java.lang.annotation.RetentionPolicy;
-import java.lang.annotation.Target;
+import com.amlinv.jmxutil.connection.impl.JMXMBeanConnection;
+
+import javax.management.remote.JMXConnector;
+import java.io.IOException;
 
 /**
- * Indicates an mbean attribute with the given name; <b>must</b> be the setter.
- * Created by art on 3/31/15.
+ * Created by art on 8/18/15.
  */
-@Retention(RetentionPolicy.RUNTIME)
-@Target(ElementType.METHOD)
-public @interface MBeanAttribute {
-    String name();
-
-    Class<?> type();
+public interface JMXMBeanConnectionFactory {
+    JMXMBeanConnection create(JMXConnector jmxConnector) throws IOException;
 }
