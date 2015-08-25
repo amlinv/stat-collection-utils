@@ -93,8 +93,6 @@ public class JMXRemoteUrlConnectionFactory implements MBeanAccessConnectionFacto
                 } catch ( IOException ioExc ) {
                     this.log.info("IO exception closing jmx connector after mbean connection failure", ioExc);
                 }
-            } else {
-                log.info("TBD999 XXX");
             }
         }
     }
