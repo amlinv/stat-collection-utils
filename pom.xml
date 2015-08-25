@@ -20,7 +20,7 @@
 
     <groupId>com.amlinv</groupId>
     <artifactId>stat-collection-utils</artifactId>
-    <version>1.0.1-SNAPSHOT</version>
+    <version>1.0.1</version>
     <packaging>jar</packaging>
 
     <name>Statistics Collection Utilities</name>
@@ -201,7 +201,7 @@
         <connection>scm:git:git@github.com:amlinv/stat-collection-utils.git</connection>
         <developerConnection>scm:git:git@github.com:amlinv/stat-collection-utils.git</developerConnection>
         <url>git@github.com:amlinv/stat-collection-utils.git</url>
-        <tag>HEAD</tag>
+        <tag>stat-collection-utils-1.0.1</tag>
     </scm>
 
     <distributionManagement>
