@@ -19,6 +19,10 @@
 
 package com.amlinv.jmxutil.polling;
 
+import com.amlinv.javasched.Scheduler;
+import com.amlinv.javasched.SchedulerProcess;
+import com.amlinv.javasched.SchedulerProcessExecutionSlip;
+import com.amlinv.javasched.Step;
 import com.amlinv.jmxutil.connection.MBeanAccessConnection;
 import com.amlinv.jmxutil.connection.MBeanAccessConnectionFactory;
 import com.amlinv.jmxutil.connection.impl.MBeanBatchCapableAccessConnection;
@@ -35,24 +39,15 @@ import java.lang.reflect.InvocationTargetException;
 import java.util.Collections;
 import java.util.LinkedList;
 import java.util.List;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Future;
-import java.util.concurrent.LinkedBlockingDeque;
-import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
+ * Poller of JMX Attributes that polls periodically based on anotations on poll objects and stores the results back into
+ * those objects.
+ * <p/>
  * Created by art on 3/31/15.
  */
 public class JmxAttributePoller {
     private static final Logger DEFAULT_LOGGER = LoggerFactory.getLogger(JmxAttributePoller.class);
-
-    private static final int DEFAULT_THREAD_POOL_CORE_COUNT = 20;
-    private static final int DEFAULT_THREAD_POOL_MAX_COUNT = Integer.MAX_VALUE; // Unbounded queue, so this is meaningless
-    private static final int DEFAULT_THREAD_POOL_KEEP_ALIVE_SEC = 60;
 
     private final List<Object> polledObjects;
 
@@ -69,8 +64,7 @@ public class JmxAttributePoller {
 
     private boolean shutdownInd = false;
     private boolean pollActiveInd = false;
-    private ThreadPoolExecutor threadPoolExecutor;
-    private boolean myThreadPoolExecutor = false;
+    private Scheduler scheduler;
 
     private ConcurrencyTestHooks concurrencyTestHooks = new ConcurrencyTestHooks();
 
@@ -86,13 +80,12 @@ public class JmxAttributePoller {
         this.mBeanAccessConnectionFactory = mBeanAccessConnectionFactory;
     }
 
-    public ThreadPoolExecutor getThreadPoolExecutor() {
-        return threadPoolExecutor;
+    public Scheduler getScheduler() {
+        return scheduler;
     }
 
-    public void setThreadPoolExecutor(ThreadPoolExecutor threadPoolExecutor) {
-        this.myThreadPoolExecutor = false;
-        this.threadPoolExecutor = threadPoolExecutor;
+    public void setScheduler(Scheduler scheduler) {
+        this.scheduler = scheduler;
     }
 
     public List<Object> getPolledObjects() {
@@ -147,11 +140,6 @@ public class JmxAttributePoller {
                 return;
             }
 
-            if (this.threadPoolExecutor == null) {
-                this.threadPoolExecutor = createThreadPoolExecutor();
-                this.myThreadPoolExecutor = true;
-            }
-
             // Atomically indicate polling is active now so a caller can determine with certainty whether polling is
             //  completely shutdown.
             pollActiveInd = true;
@@ -184,6 +172,7 @@ public class JmxAttributePoller {
     }
 
 
+
                                         ////             ////
                                         ////  INTERNALS  ////
                                         ////             ////
@@ -197,37 +186,44 @@ public class JmxAttributePoller {
     protected boolean pollIndividually() throws IOException {
         this.concurrencyTestHooks.onStartPollIndividually();
 
-        List<Future<Void>> calls = new LinkedList<>();
+        List<SchedulerProcessExecutionSlip> processExecutionSlipList = new LinkedList<>();
         for (final Object onePolledObject : this.polledObjects) {
             // Stop as soon as possible if shutting down.
             if (shutdownInd) {
                 return true;
             }
 
-            Future<Void> future =
-                    this.threadPoolExecutor.submit(new Callable<Void>() {
-                        @Override
-                        public Void call() throws Exception {
-                            pollOneObject(onePolledObject);
-                            return null;
-                        }
-                    });
-
-            calls.add(future);
+            SchedulerProcess process = new PollOneObjectSchedulerProcess(onePolledObject);
+            SchedulerProcessExecutionSlip executionSlip = this.scheduler.startProcess(process);
+            processExecutionSlipList.add(executionSlip);
         }
 
-        for (Future<Void> oneFuture : calls) {
+        for (SchedulerProcessExecutionSlip oneExecutionSlip : processExecutionSlipList) {
             try {
-                oneFuture.get();
+                //
+                // Wait for this process to complete
+                //
+                oneExecutionSlip.waitUntilComplete();
+
+
+                //
+                // Check for a failure
+                //
+                PollOneObjectSchedulerProcess process =
+                        (PollOneObjectSchedulerProcess) oneExecutionSlip.getSchedulerProcess();
+
+                Exception exc = process.getFailureException();
+                if (exc != null) {
+                    log.warn("failed to poll object", exc);
+
+                    // Propagate IOExceptions since they most likely mean that the connection needs to be recovered.
+                    if (exc instanceof IOException) {
+                        throw (IOException) exc;
+                    }
+                }
+
             } catch (InterruptedException intExc) {
                 log.info("interrupted while polling object");
-            } catch (ExecutionException execExc) {
-                log.warn("failed to poll object", execExc);
-
-                // Propagate IOExceptions since they most likely mean that we need to recover the connection.
-                if (execExc.getCause() instanceof IOException) {
-                    throw (IOException) execExc.getCause();
-                }
             }
         }
 
@@ -237,10 +233,6 @@ public class JmxAttributePoller {
     public void shutdown() {
         this.shutdownInd = true;
         this.batchPollProcessor.shutdown();
-
-        if (this.myThreadPoolExecutor) {
-            this.threadPoolExecutor.shutdown();
-        }
 
         synchronized (this) {
             this.notifyAll();
@@ -261,36 +253,6 @@ public class JmxAttributePoller {
                 this.wait();
             }
         }
-    }
-
-    /**
-     * Create a thread pool executor that will be used to execute individual queries.
-     *
-     * @return new thread pool executor.
-     */
-    protected ThreadPoolExecutor createThreadPoolExecutor() {
-        ThreadFactory threadFactory = new ThreadFactory() {
-            private AtomicLong threadCounter = new AtomicLong(0);
-
-            @Override
-            public Thread newThread(Runnable runnable) {
-                Thread result = new Thread(runnable);
-
-                result.setName("jmx-attribute-poller-thread-" + this.threadCounter.incrementAndGet());
-
-                return result;
-            }
-        };
-
-        ThreadPoolExecutor result = new ThreadPoolExecutor(
-                DEFAULT_THREAD_POOL_CORE_COUNT,
-                DEFAULT_THREAD_POOL_MAX_COUNT,
-                DEFAULT_THREAD_POOL_KEEP_ALIVE_SEC,
-                TimeUnit.SECONDS,
-                new LinkedBlockingDeque<Runnable>(),
-                threadFactory);
-
-        return result;
     }
 
     protected void checkConnection() throws IOException {
@@ -336,6 +298,50 @@ public class JmxAttributePoller {
         } catch (IOException ioExc) {
             log.warn("exception on shutdown of jmx connection to {}",
                     this.mBeanAccessConnectionFactory.getTargetDescription(), ioExc);
+        }
+    }
+
+    /**
+     * Process for polling a single object.
+     */
+    protected class PollOneObjectSchedulerProcess implements SchedulerProcess {
+        private boolean done = false;
+        private final Object target;
+        private Exception failureException;
+
+        public PollOneObjectSchedulerProcess(Object target) {
+            this.target = target;
+        }
+
+        public Exception getFailureException() {
+            return failureException;
+        }
+
+        @Override
+        public Step getNextStep() {
+            if (done || shutdownInd) {
+                return null;
+            }
+
+            Step result = new Step() {
+                @Override
+                public void execute() {
+                    try {
+                        pollOneObject(target);
+                    } catch (Exception exc) {
+                        failureException = exc;
+                    } finally {
+                        done = true;
+                    }
+                }
+
+                @Override
+                public boolean isBlocking() {
+                    return true;
+                }
+            };
+
+            return result;
         }
     }
 

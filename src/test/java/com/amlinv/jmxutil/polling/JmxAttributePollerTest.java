@@ -16,6 +16,9 @@
 
 package com.amlinv.jmxutil.polling;
 
+import com.amlinv.javasched.Scheduler;
+import com.amlinv.javasched.SchedulerProcess;
+import com.amlinv.javasched.SchedulerProcessExecutionSlip;
 import com.amlinv.jmxutil.annotation.MBeanAttribute;
 import com.amlinv.jmxutil.annotation.MBeanLocation;
 import com.amlinv.jmxutil.connection.MBeanAccessConnection;
@@ -51,7 +54,7 @@ public class JmxAttributePollerTest {
     private JmxAttributePoller poller;
 
     private MBeanAccessConnectionFactory mockMBeanAccessConnectionFactory;
-    private ThreadPoolExecutor mockThreadPoolExecutor;
+    private Scheduler mockScheduler;
 
     private MBeanBatchCapableAccessConnection mockBatchCapableAccessConnection;
     private MBeanAccessConnection mockAccessConnection;
@@ -63,8 +66,8 @@ public class JmxAttributePollerTest {
     private Logger mockLogger;
 
     private List<Object> polledObjects;
-    private List<Future> mockFutures;
-    private List<Callable> callables;
+    private List<SchedulerProcessExecutionSlip> executionSlips;
+    private List<SchedulerProcess> processes;
 
     private TestDataClass001 polled001;
 
@@ -80,7 +83,7 @@ public class JmxAttributePollerTest {
         this.polledObjects.add(polled001);
 
         this.mockMBeanAccessConnectionFactory = Mockito.mock(MBeanAccessConnectionFactory.class);
-        this.mockThreadPoolExecutor = Mockito.mock(ThreadPoolExecutor.class);
+        this.mockScheduler = Mockito.mock(Scheduler.class);
 
         this.mockBatchCapableAccessConnection = Mockito.mock(MBeanBatchCapableAccessConnection.class);
         this.mockAccessConnection = Mockito.mock(MBeanAccessConnection.class);
@@ -93,11 +96,12 @@ public class JmxAttributePollerTest {
 
         this.poller = new JmxAttributePoller(this.polledObjects);
 
-        this.mockFutures = new LinkedList<>();
-        this.callables = new LinkedList<>();
+        this.processes = new LinkedList<>();
+        this.executionSlips = new LinkedList<>();
 
-        Answer<Future> submitAnswer = createFutureAnswer(null, null);
-        Mockito.when(this.mockThreadPoolExecutor.submit(Mockito.any(Callable.class))).thenAnswer(submitAnswer);
+        Answer<SchedulerProcessExecutionSlip> startProcessAnswer = createProcessExecutionSlipAnswer(null, null);
+        Mockito.when(this.mockScheduler.startProcess(Mockito.any(SchedulerProcess.class)))
+                .thenAnswer(startProcessAnswer);
 
         this.testObjectName001 = new ObjectName(this.TEST_ONAME_001_STR);
 
@@ -115,11 +119,11 @@ public class JmxAttributePollerTest {
     }
 
     @Test
-    public void testGetSetThreadPoolExecutor() throws Exception {
-        assertNull(this.poller.getThreadPoolExecutor());
+    public void testGetSetScheduler() throws Exception {
+        assertNull(this.poller.getScheduler());
 
-        this.poller.setThreadPoolExecutor(this.mockThreadPoolExecutor);
-        assertSame(this.mockThreadPoolExecutor, this.poller.getThreadPoolExecutor());
+        this.poller.setScheduler(this.mockScheduler);
+        assertSame(this.mockScheduler, this.poller.getScheduler());
     }
 
     @Test
@@ -169,12 +173,12 @@ public class JmxAttributePollerTest {
 
         this.poller.poll();
 
-        assertEquals(2, callables.size());
+        assertEquals(2, processes.size());
 
-        callables.get(0).call();
+        processes.get(0).getNextStep().execute();
         Mockito.verifyNoMoreInteractions(this.mockAccessConnection);
 
-        callables.get(1).call();
+        processes.get(1).getNextStep().execute();
         assertEquals("x-value-x", this.polled001.getName());
     }
 
@@ -189,36 +193,11 @@ public class JmxAttributePollerTest {
     }
 
     @Test
-    public void testAutoCreateThreadPoolExecutor() throws Exception {
-        this.poller.setmBeanAccessConnectionFactory(this.mockMBeanAccessConnectionFactory);
-        this.poller.setLog(this.mockLogger);
-
-        assertNull(this.poller.getThreadPoolExecutor());
-
-        this.poller.poll();
-
-        assertNotNull(this.poller.getThreadPoolExecutor());
-    }
-
-    @Test
     public void testShutdown() throws Exception {
         this.poller.setBatchPollProcessor(this.mockBatchPollProcessor);
         this.poller.shutdown();
 
         Mockito.verify(this.mockBatchPollProcessor).shutdown();
-    }
-
-    @Test
-    public void testShutdownWithAutoCreatedThreadPoolExecutor() throws Exception {
-        this.setupPoller(false);
-        this.poller.setThreadPoolExecutor(null);
-        this.poller.setObjectQueryPreparer(this.mockObjectQueryPreparer);
-
-        this.poller.poll();
-        this.poller.shutdown();
-
-        Thread.sleep(250);
-        assertTrue(this.poller.getThreadPoolExecutor().isShutdown());
     }
 
     @Test(timeout = 3000L)
@@ -345,19 +324,31 @@ public class JmxAttributePollerTest {
 
     @Test
     public void testExecutionExceptionOnPollIndividually() throws Exception {
+        //
+        // SETUP
+        //
         IOException ioExc = new IOException("x-io-exc-x");
-        ExecutionException execExc = new ExecutionException("x-exec-exc-x", ioExc);
-        Answer<Future> submitAnswer = createFutureAnswer(execExc, null);
-        Mockito.when(this.mockThreadPoolExecutor.submit(Mockito.any(Callable.class))).thenAnswer(submitAnswer);
 
         this.setupPoller(false);
 
+        Answer<SchedulerProcessExecutionSlip> ioExcAnswer = createProcessExecutionSlipAnswer(ioExc, null);
+        Mockito.doAnswer(ioExcAnswer).when(this.mockScheduler).startProcess(Mockito.any(SchedulerProcess.class));
+
+
+        //
+        // EXECUTE
+        //
         try {
             this.poller.poll();
+
+            //
+            // VERIFY
+            //
+            fail("missing expected exception");
         } catch (IOException caught) {
             assertSame(ioExc, caught);
 
-            Mockito.verify(this.mockLogger).warn("failed to poll object", execExc);
+            Mockito.verify(this.mockLogger).warn("failed to poll object", ioExc);
             Mockito.verify(this.mockAccessConnection).close();
         }
     }
@@ -365,8 +356,9 @@ public class JmxAttributePollerTest {
     @Test
     public void testInterruptedExceptionOnPollIndividually() throws Exception {
         InterruptedException intExc = new InterruptedException("x-intr-exc-x");
-        Answer<Future> submitAnswer = createFutureAnswer(null, intExc);
-        Mockito.when(this.mockThreadPoolExecutor.submit(Mockito.any(Callable.class))).thenAnswer(submitAnswer);
+
+        Answer<SchedulerProcessExecutionSlip> intrExecAnswer = createProcessExecutionSlipAnswer(null, intExc);
+        Mockito.doAnswer(intrExecAnswer).when(this.mockScheduler).startProcess(Mockito.any(SchedulerProcess.class));
 
         this.setupPoller(false);
 
@@ -375,6 +367,20 @@ public class JmxAttributePollerTest {
         // Verify interruption logged once for each polled object
         Mockito.verify(this.mockLogger, Mockito.times(this.polledObjects.size()))
                 .info("interrupted while polling object");
+    }
+
+    @Test
+    public void testOtherExceptionOnPollIndividually() throws Exception {
+        this.setupPoller(false);
+
+        RuntimeException testExc = new RuntimeException("x-rt-exc-x");
+        Answer<SchedulerProcessExecutionSlip> intrExecAnswer = createProcessExecutionSlipAnswer(testExc, null);
+        Mockito.doAnswer(intrExecAnswer).when(this.mockScheduler).startProcess(Mockito.any(SchedulerProcess.class));
+
+
+        this.poller.poll();
+
+        Mockito.verify(this.mockLogger).warn("failed to poll object", testExc);
     }
 
     /**
@@ -386,19 +392,20 @@ public class JmxAttributePollerTest {
     public void testIOExceptionOnSafeClose() throws Exception {
         IOException ioExc1 = new IOException("x-io-exc1-x");
         IOException ioExc2 = new IOException("x-io-exc2-x");
-        ExecutionException execExc = new ExecutionException("x-exec-exc-x", ioExc1);
-        Answer<Future> submitAnswer = createFutureAnswer(execExc, null);
-        Mockito.when(this.mockThreadPoolExecutor.submit(Mockito.any(Callable.class))).thenAnswer(submitAnswer);
-        Mockito.doThrow(ioExc2).when(this.mockAccessConnection).close();
 
         this.setupPoller(false);
 
+        Answer<SchedulerProcessExecutionSlip> execExcAnswer = createProcessExecutionSlipAnswer(ioExc1, null);
+        Mockito.doAnswer(execExcAnswer).when(this.mockScheduler).startProcess(Mockito.any(SchedulerProcess.class));
+        Mockito.doThrow(ioExc2).when(this.mockAccessConnection).close();
+
         try {
             this.poller.poll();
+            fail("missing expected exception");
         } catch (IOException caught) {
             assertSame(ioExc1, caught);
 
-            Mockito.verify(this.mockLogger).warn("failed to poll object", execExc);
+            Mockito.verify(this.mockLogger).warn("failed to poll object", ioExc1);
             Mockito.verify(this.mockLogger).warn("exception on shutdown of jmx connection to {}",
                     this.accessConnectionFactoryDesc, ioExc2);
         }
@@ -414,7 +421,7 @@ public class JmxAttributePollerTest {
 
         this.poller.poll();
 
-        callables.get(1).call();
+        processes.get(1).getNextStep().execute();
 
         Mockito.verify(this.mockLogger)
                 .debug("instance not found on polling object: oname={}", new Object[]{this.testObjectName001, infExc});
@@ -437,7 +444,7 @@ public class JmxAttributePollerTest {
 
         this.poller.poll();
 
-        Mockito.verify(this.mockThreadPoolExecutor, Mockito.times(0)).submit(Mockito.any(Callable.class));
+        Mockito.verify(this.mockScheduler, Mockito.times(0)).startProcess(Mockito.any(SchedulerProcess.class));
     }
 
     /**
@@ -484,26 +491,75 @@ public class JmxAttributePollerTest {
         this.poller.safeClose(null);
     }
 
+    /**
+     * Verify the step created by a polling process are blocking.
+     *
+     * @throws Exception
+     */
+    @Test
+    public void testSchedulerStepIsBlocking() throws Exception {
+        JmxAttributePoller.PollOneObjectSchedulerProcess process = this.poller.new PollOneObjectSchedulerProcess("");
+        assertTrue(process.getNextStep().isBlocking());
+    }
+
+    /**
+     * Verify the polling proces only returns one step.
+     *
+     * @throws Exception
+     */
+    @Test
+    public void testGetStepWhenProcessDone() throws Exception {
+        JmxAttributePoller.PollOneObjectSchedulerProcess process = this.poller.new PollOneObjectSchedulerProcess("");
+        process.getNextStep().execute();
+        assertNull(process.getNextStep());
+    }
+
+    /**
+     * Verify the polling process does not return a step after poller shutdown.
+     *
+     * @throws Exception
+     */
+    @Test
+    public void testGetStepAfterShutdown() throws Exception {
+        this.poller.shutdown();
+
+        JmxAttributePoller.PollOneObjectSchedulerProcess process = this.poller.new PollOneObjectSchedulerProcess("");
+        assertNull(process.getNextStep());
+    }
+
+
 
                                         ////             ////
                                         ////  INTERNALS  ////
                                         ////             ////
 
-    protected Answer<Future> createFutureAnswer(final ExecutionException execExc, final InterruptedException intrExc) {
-        return new Answer<Future>() {
+    protected Answer<SchedulerProcessExecutionSlip> createProcessExecutionSlipAnswer(final Exception execExc,
+                                                              final InterruptedException intrExc) {
+
+        return new Answer<SchedulerProcessExecutionSlip>() {
             @Override
-            public Future answer(InvocationOnMock invocationOnMock) throws Throwable {
-                callables.add(invocationOnMock.getArgumentAt(0, Callable.class));
-                Future result = Mockito.mock(Future.class);
-                mockFutures.add(result);
+            public SchedulerProcessExecutionSlip answer(InvocationOnMock invocationOnMock) throws Throwable {
+                JmxAttributePoller.PollOneObjectSchedulerProcess process =
+                        invocationOnMock.getArgumentAt(0, JmxAttributePoller.PollOneObjectSchedulerProcess.class);
+
+                processes.add(process);
+
+                SchedulerProcessExecutionSlip result = Mockito.mock(SchedulerProcessExecutionSlip.class);
+                executionSlips.add(result);
 
                 if (execExc != null) {
-                    Mockito.when(result.get()).thenThrow(execExc);
+                    Mockito.when(mockAccessConnection
+                            .getAttributes(Mockito.eq(testObjectName001), (String[]) Mockito.anyVararg()))
+                            .thenThrow(execExc);
+
+                    process.getNextStep().execute();
                 }
 
                 if (intrExc != null) {
-                    Mockito.when(result.get()).thenThrow(intrExc);
+                    Mockito.doThrow(intrExc).when(result).waitUntilComplete();
                 }
+
+                Mockito.doReturn(process).when(result).getSchedulerProcess();
 
                 return result;
             }
@@ -528,7 +584,7 @@ public class JmxAttributePollerTest {
         this.poller.setmBeanAccessConnectionFactory(this.mockMBeanAccessConnectionFactory);
         this.poller.setBatchPollProcessor(this.mockBatchPollProcessor);
         this.poller.setObjectQueryPreparer(this.mockObjectQueryPreparer);
-        this.poller.setThreadPoolExecutor(this.mockThreadPoolExecutor);
+        this.poller.setScheduler(this.mockScheduler);
         this.poller.setLog(this.mockLogger);
     }
 
